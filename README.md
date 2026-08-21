@@ -20,8 +20,8 @@ Project: diff‑amr‑base
 ```
 
 ### 目录说明
-1. **ros2_ws/src**：上位机所有自研ROS功能包，build、install、log编译产物不上传仓库。
-第三方驱动 ydlidar_ros2_driver、micro‑ROS‑Agent 不纳入本仓库，需要自行git clone到src目录编译。
+1. **ros2_ws/src**：上位机ROS功能包，build、install、log编译产物不上传仓库。
+第三方驱动 ydlidar_ros2_driver不纳入本仓库，需要自行git clone到src目录编译。
 
 2. **esp32_firmware 下位机固件工程**
 - `lib/`：自己封装业务库，包含电机控制、PID、运动学、传感器相关代码
