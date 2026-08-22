@@ -348,7 +348,6 @@ void monitor_task(void *args)
       esp_task_wdt_reset();
     }
 
-    // 后续可扩展：电池电压检测、通信超时判断等
     vTaskDelay(pdMS_TO_TICKS(50)); // 固定50ms周期运行
   }
 }
