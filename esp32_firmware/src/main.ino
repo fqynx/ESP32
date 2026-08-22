@@ -26,7 +26,7 @@
 #define OBSTACLE_DEBOUNCE_MAX 10  // 最大防抖计数，1000ms确认障碍物
 #define FORWARD_TRIG_SPEED 20.0f  // mm/s，大于这个前进速度才开启急停保护
 
-// 新增：超声波滤波与LED告警参数
+// 超声波滤波与LED告警参数
 #define US_VALID_MIN_CM 2.0f   // 最小有效距离
 #define US_VALID_MAX_CM 400.0f // 最大有效距离
 #define LED_WARN_FAST_CM 15.0f // 小于该值快速闪烁
