@@ -23,7 +23,7 @@
 #define ECHO 21
 #define OBSTACLE_STOP_CM 10.0f     // 障碍物距离阈值，小于10cm触发紧急停车
 #define OBSTACLE_RELEASE_CM 15.0f // 解除急停距离（滞回区间)
-#define OBSTACLE_DEBOUNCE_MAX 10  // 最大防抖计数，1000ms确认障碍物
+#define OBSTACLE_DEBOUNCE_MAX 100  // 最大防抖计数，1000ms确认障碍物
 #define FORWARD_TRIG_SPEED 20.0f  // mm/s，大于这个前进速度才开启急停保护
 
 // 超声波滤波与LED告警参数
@@ -71,7 +71,6 @@ MPU6050 mpu(Wire); // 实例化IMU，绑定I2C总线
 bool g_emergency_stop = false;     // 全局紧急停车标志
 uint8_t obstacle_debounce_cnt = 0; // 障碍物防抖计数器
 uint8_t g_led_blink_cnt = 0;       // LED闪烁计数器
-uint8_t g_print_cnt = 0;           // 串口打印计数器
 uint32_t g_loop_heartbeat = 0;     // 底盘任务心跳计数，用于看门狗监控
 
 float g_shared_dist = -1.0f;       // 共享的距离数据，仅由采集任务写入，底盘/监控任务只读
@@ -135,71 +134,25 @@ void setup()
     Serial.println("Mutex create failed!");
   }
 
-  // 创建传感器采集任务（优先级1，和底盘同级）
-  xTaskCreate(sample_task, "sample", 4096, NULL, 1, NULL);
+  // 底盘控制任务，优先级最高
+  xTaskCreate(chassis_task, "chassis_task", 4096, NULL, 5, NULL);
 
   // micro-R0S通信任务
-  xTaskCreate(microros_task, "microros_task", 10240, NULL, 2, NULL);
+  xTaskCreate(microros_task, "microros_task", 10240, NULL, 3, NULL); 
 
+  // 创建传感器采集任务
+  xTaskCreate(sample_task, "sample", 4096, NULL, 2, NULL);
+  
   // 创建系统监控任务
-  xTaskCreate(monitor_task, "monitor_task", 4096, NULL, 3, NULL);
+  xTaskCreate(monitor_task, "monitor_task", 4096, NULL, 1, NULL);
 }
 
-// 底盘控制
 void loop()
 {
-  delay(10); // 等待10毫秒
+  delay(1000); // 等待1000毫秒
 
   g_loop_heartbeat++;
   g_led_blink_cnt++;
-  g_print_cnt++;
-
-  // 读取超声波距离数据
-  float dist = -1.0f;
-  if (xSemaphoreTake(g_DataMutex, pdMS_TO_TICKS(5)) == pdTRUE)
-  {
-    dist = g_shared_dist;
-    xSemaphoreGive(g_DataMutex);
-  }
-
-  // 获取里程计
-  odom_t odom = kinematics.get_odom();
-  float chassis_linear_speed = odom.linear_speed; // 底盘当前线速度 mm/s
-
-  // 障碍物防抖 + 硬件安全兜底（双阈值滞回状态机）
-  if(!g_emergency_stop)
-  {
-      // 未触发状态：只有向前行驶+距离足够近，才触发保护
-      bool enable_check = (chassis_linear_speed > FORWARD_TRIG_SPEED);
-      if(enable_check && dist > 0 && dist < OBSTACLE_STOP_CM)
-      {
-          obstacle_debounce_cnt++;
-          if(obstacle_debounce_cnt > OBSTACLE_DEBOUNCE_MAX)
-              obstacle_debounce_cnt = OBSTACLE_DEBOUNCE_MAX;
-
-          if(obstacle_debounce_cnt >= OBSTACLE_DEBOUNCE_MAX)
-              g_emergency_stop = true;
-      }
-      else
-      {
-          // 不满足触发条件，计数衰减
-          if(obstacle_debounce_cnt > 0)
-              obstacle_debounce_cnt--;
-      }
-  }
-  else
-  {
-      // 已触发状态：只有距离足够远才解除，和车速无关
-      if(dist > 0 && dist > OBSTACLE_RELEASE_CM)
-      {
-          obstacle_debounce_cnt--;
-          if(obstacle_debounce_cnt <= 0)
-          {
-              obstacle_debounce_cnt = 0;
-              g_emergency_stop = false;
-          }
-      }
-  }
 
   // LED分层告警逻辑，无效或距离安全则常亮，距离中等慢速闪烁，距离近快速闪烁
   if (dist < 0)
@@ -241,35 +194,95 @@ void loop()
                   g_emergency_stop ? "TRIGGERED" : "normal",
                   chassis_linear_speed);
   }
-
-  // 更新电机速度
-  kinematics.update_motor_speed(millis(), encoders[0].getTicks(), encoders[1].getTicks());
-
-  // PID闭环计算
-  float out0 = pid_controller[0].update(kinematics.get_motor_speed(0));
-  float out1 = pid_controller[1].update(kinematics.get_motor_speed(1));
-
-  // 急停：仅截断正向输出，不修改PID任何内部状态
-  if (g_emergency_stop)
-  {
-    if (out0 > 0)
-      out0 = 0;
-    if (out1 > 0)
-      out1 = 0;
-  }
-
-  motor.updateMotorSpeed(0, out0);
-  motor.updateMotorSpeed(1, out1);
-
-  // // PID闭环控制
-  // motor.updateMotorSpeed(0, pid_controller[0].update(kinematics.get_motor_speed(0)));
-  // motor.updateMotorSpeed(1, pid_controller[1].update(kinematics.get_motor_speed(1)));
-
-  // 每 10ms 更新里程计
-  kinematics.update_odom(10);
-
+  
   // // 打印两个电机速度
   // Serial.printf("speed1=%f mm/s, speed2=%f mm/s\n", current_speed[0], current_speed[1]);
+}
+
+// ========== 底盘控制任务 ==========
+void chassis_task(void *args)
+{
+  
+  while(1)
+  {
+    g_loop_heartbeat++;
+     
+    // 读取超声波距离数据
+    float dist = -1.0f;
+    if (xSemaphoreTake(g_DataMutex, 0) == pdTRUE)
+    {
+      dist = g_shared_dist;
+      xSemaphoreGive(g_DataMutex);
+    }
+  
+    // 获取里程计
+    odom_t odom = kinematics.get_odom();
+    float chassis_linear_speed = odom.linear_speed; // 底盘当前线速度 mm/s
+  
+    // 障碍物防抖 + 硬件安全兜底（双阈值滞回状态机）
+    if(!g_emergency_stop)
+    {
+        // 未触发状态：只有向前行驶+距离足够近，才触发保护
+        bool enable_check = (chassis_linear_speed > FORWARD_TRIG_SPEED);
+        if(enable_check && dist > 0 && dist < OBSTACLE_STOP_CM)
+        {
+            obstacle_debounce_cnt++;
+            if(obstacle_debounce_cnt > OBSTACLE_DEBOUNCE_MAX)
+                obstacle_debounce_cnt = OBSTACLE_DEBOUNCE_MAX;
+  
+            if(obstacle_debounce_cnt >= OBSTACLE_DEBOUNCE_MAX)
+                g_emergency_stop = true;
+        }
+        else
+        {
+            // 不满足触发条件，计数衰减
+            if(obstacle_debounce_cnt > 0)
+                obstacle_debounce_cnt--;
+        }
+    }
+    else
+    {
+        // 已触发状态：只有距离足够远才解除，和车速无关
+        if(dist > 0 && dist > OBSTACLE_RELEASE_CM)
+        {
+            obstacle_debounce_cnt--;
+            if(obstacle_debounce_cnt <= 0)
+            {
+                obstacle_debounce_cnt = 0;
+                g_emergency_stop = false;
+            }
+        }
+    }
+    
+    // 更新电机速度
+    kinematics.update_motor_speed(millis(), encoders[0].getTicks(), encoders[1].getTicks());
+  
+    // PID闭环计算
+    float out0 = pid_controller[0].update(kinematics.get_motor_speed(0));
+    float out1 = pid_controller[1].update(kinematics.get_motor_speed(1));
+  
+    // 急停：仅截断正向输出，不修改PID任何内部状态
+    if (g_emergency_stop)
+    {
+      if (out0 > 0)
+        out0 = 0;
+      if (out1 > 0)
+        out1 = 0;
+    }
+  
+    motor.updateMotorSpeed(0, out0);
+    motor.updateMotorSpeed(1, out1);
+  
+    // // PID闭环控制
+    // motor.updateMotorSpeed(0, pid_controller[0].update(kinematics.get_motor_speed(0)));
+    // motor.updateMotorSpeed(1, pid_controller[1].update(kinematics.get_motor_speed(1)));
+
+    // 每 10ms 更新里程计
+    kinematics.update_odom(10);
+    
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+
 }
 
 // ========== micro‑ROS通信任务 ==========
@@ -329,7 +342,7 @@ void monitor_task(void *args)
   uint32_t last_heartbeat = 0;
   uint8_t heartbeat_timeout_cnt = 0;
 
-  for (;;)
+  while(1)
   {
     // 1. 检测底盘控制任务心跳
     if (g_loop_heartbeat != last_heartbeat)
@@ -348,14 +361,14 @@ void monitor_task(void *args)
       esp_task_wdt_reset();
     }
 
-    vTaskDelay(pdMS_TO_TICKS(50)); // 固定50ms周期运行
+    vTaskDelay(pdMS_TO_TICKS(100)); // 固定100ms周期运行
   }
 }
 
 //  ========== 数据采集任务（采集超声波、电压、故障状态等数据，周期100ms） ==========
 void sample_task(void *args)
 {
-  for (;;)
+  while(1)
   {
     // Serial.println("sample running...");
 
